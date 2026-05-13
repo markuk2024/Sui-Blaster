@@ -338,12 +338,31 @@ async def get_sui_balance(address: str) -> float:
         print(f"Error getting balance: {e}")
         return 0
 
-async def fetch_pool_balance_onchain(pool_object_id: str) -> Optional[int]:
-    """Fetch the live escrow balance stored in the pool's dynamic field."""
+async def fetch_pool_data_onchain(pool_object_id: str) -> dict:
+    """Fetch live escrow balance and participants from the pool object."""
+    data = {"balance": None, "players": []}
     if not pool_object_id or pool_object_id == "0x0":
-        return None
+        return data
 
-    # 1. Try generic dynamic field discovery (best for upgraded packages)
+    try:
+        params = [pool_object_id, {"showContent": True}]
+        result = await call_sui_rpc("sui_getObject", params)
+        obj_data = result.get("result", {}).get("data", {}).get("content", {}).get("fields", {})
+        
+        # Sync balance (legacy field)
+        balance_val = obj_data.get("balance")
+        if balance_val is not None:
+            data["balance"] = int(balance_val)
+            
+        # Sync players vector
+        players = obj_data.get("players", [])
+        if players:
+            data["players"] = players
+            
+    except Exception as e:
+        print(f"Error syncing on-chain pool data: {e}")
+
+    # Also try dynamic field for balance (new structure)
     try:
         fields_resp = await call_sui_rpc("suix_getDynamicFields", [pool_object_id, None, 50])
         field_entries = fields_resp.get("result", {}).get("data", [])
@@ -351,7 +370,6 @@ async def fetch_pool_balance_onchain(pool_object_id: str) -> Optional[int]:
         for entry in field_entries:
             name_info = entry.get("name", {})
             name_type = name_info.get("type", "")
-            # Match any EscrowKey regardless of package ID
             if name_type and "::pool::EscrowKey" in name_type:
                 escrow_field_id = entry.get("objectId")
                 if escrow_field_id:
@@ -361,30 +379,19 @@ async def fetch_pool_balance_onchain(pool_object_id: str) -> Optional[int]:
                     dyn_fields = dyn_data.get("content", {}).get("fields", {})
                     balance_struct = dyn_fields.get("value")
                     
-                    if isinstance(balance_struct, dict):
-                        val = balance_struct.get("fields", {}).get("value")
-                    else:
-                        val = balance_struct
-                        
+                    val = balance_struct.get("fields", {}).get("value") if isinstance(balance_struct, dict) else balance_struct
                     if val is not None:
+                        data["balance"] = int(val)
                         print(f"Sync: Found {int(val)} Mist in dynamic field for {pool_object_id}")
-                        return int(val)
-    except Exception as e:
-        print(f"Generic sync failed for {pool_object_id}: {e}")
-
-    # 2. Try legacy 'balance' field (for very old pools or direct storage)
-    try:
-        params = [pool_object_id, {"showContent": True}]
-        result = await call_sui_rpc("sui_getObject", params)
-        fields = result.get("result", {}).get("data", {}).get("content", {}).get("fields", {})
-        balance_val = fields.get("balance")
-        if balance_val is not None:
-            print(f"Sync: Found {int(balance_val)} Mist in legacy balance field for {pool_object_id}")
-            return int(balance_val)
-    except Exception as e:
+    except Exception:
         pass
 
-    return 0
+    return data
+
+async def fetch_pool_balance_onchain(pool_object_id: str) -> Optional[int]:
+    """Fetch the live escrow balance stored in the pool's dynamic field."""
+    onchain = await fetch_pool_data_onchain(pool_object_id)
+    return onchain.get("balance")
 
 async def verify_sui_transaction(transaction_id: str, pool_id: str, expected_entry_fee: int):
     """Verify a Sui transaction and extract payment details"""
@@ -774,11 +781,31 @@ async def get_pools():
         participants_list = pool_participants.get(pool["id"], [])
 
         contract_id = pool_copy.get("contract_id")
-        onchain_balance = await fetch_pool_balance_onchain(contract_id) if contract_id else None
+        onchain_data = await fetch_pool_data_onchain(contract_id) if contract_id else {"balance": None, "players": []}
+        
+        onchain_balance = onchain_data.get("balance")
         if onchain_balance is not None and onchain_balance != raw_mist:
             raw_mist = onchain_balance
             escrow_funds[pool["id"]] = raw_mist
             state_changed = True
+
+        # Sync participants from chain if local list is empty or smaller
+        onchain_players = onchain_data.get("players", [])
+        if onchain_players:
+            current_wallets = get_pool_wallets(pool["id"])
+            for addr in onchain_players:
+                if addr not in current_wallets:
+                    print(f"Sync: Restoring missing participant {addr} from chain for {pool['id']}")
+                    pool_participants[pool["id"]].append({
+                        "wallet": addr,
+                        "joined_at": int(time.time()),
+                        "games_played": 0,
+                        "best_score": 0,
+                        "total_score": 0,
+                        "last_active": int(time.time()),
+                        "restored": True
+                    })
+                    state_changed = True
 
         current_prize = raw_mist / 1_000_000_000
 
