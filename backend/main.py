@@ -1343,16 +1343,29 @@ async def admin_force_payout(pool_id: str):
     
     dev_wallet = config.DEV_WALLET_ADDRESS
     
-    # If leaderboard is empty (data was lost), add dev wallet as sole winner
+    # If leaderboard is empty (data was lost), try to use synced participants
     if not pool_leaderboards.get(pool_id):
-        print(f"FORCE PAYOUT: No scores found for {pool_id}, adding dev wallet as winner")
-        pool_leaderboards[pool_id].append({
-            "wallet": dev_wallet,
-            "score": 999999,
-            "timestamp": int(time.time() * 1000),
-            "game_duration": 60,
-            "forced": True
-        })
+        participants = pool_participants.get(pool_id, [])
+        if participants:
+            print(f"FORCE PAYOUT: No scores found for {pool_id}, but found {len(participants)} participants. Adding them to leaderboard for recovery.")
+            for p in participants:
+                wallet = p.get("wallet") if isinstance(p, dict) else p
+                pool_leaderboards[pool_id].append({
+                    "wallet": wallet,
+                    "score": 1, # Dummy score to allow distribution
+                    "timestamp": int(time.time() * 1000),
+                    "game_duration": 0,
+                    "forced": True
+                })
+        else:
+            print(f"FORCE PAYOUT: No scores OR participants found for {pool_id}, adding dev wallet as winner")
+            pool_leaderboards[pool_id].append({
+                "wallet": dev_wallet,
+                "score": 999999,
+                "timestamp": int(time.time() * 1000),
+                "game_duration": 60,
+                "forced": True
+            })
         save_data()
     
     # Ensure dev wallet is in participants list
