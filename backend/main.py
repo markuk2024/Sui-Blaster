@@ -491,18 +491,18 @@ async def call_smart_contract(function: str, args: list):
             try:
                 # Handle Hex keys (64 or 66 chars) by converting to Base64 for pysui
                 import base64
-                if len(admin_key) in [64, 66]:
-                    key_hex = admin_key
-                    if key_hex.startswith("0x"):
-                        key_hex = key_hex[2:]
-                    if len(key_hex) == 64:
-                        try:
-                            # Convert hex to bytes, then base64
-                            key_bytes = bytes.fromhex(key_hex)
-                            admin_key = base64.b64encode(key_bytes).decode('utf-8')
-                            print("Converted Hex private key to Base64 for pysui")
-                        except Exception as e:
-                            print(f"Key conversion failed: {e}")
+                key_to_check = admin_key
+                if key_to_check.startswith("0x"):
+                    key_to_check = key_to_check[2:]
+                
+                if len(key_to_check) in [64, 66]:
+                    try:
+                        # Convert hex to bytes, then base64
+                        key_bytes = bytes.fromhex(key_to_check)
+                        admin_key = base64.b64encode(key_bytes).decode('utf-8')
+                        print(f"DEBUG: Converted {len(key_to_check)} char Hex key to Base64")
+                    except Exception as e:
+                        print(f"DEBUG: Key conversion failed: {e}")
 
                 # Initialize Sui client with admin key
                 try:
@@ -1270,7 +1270,7 @@ def get_backend_status():
     total_dev = sum(dev_fees_collected.values())
     return {
         "status": "running",
-        "version": "2.0.6",
+        "version": "2.0.7",
         "timestamp": int(time.time()),
         "pools": {
             pool_id: {
