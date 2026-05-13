@@ -477,6 +477,9 @@ async def call_smart_contract(function: str, args: list):
     """Call a smart contract function on Sui - attempts real transaction if pysui + admin key available"""
     try:
         admin_key = config.ADMIN_PRIVATE_KEY.strip() if config.ADMIN_PRIVATE_KEY else ""
+        # Remove 0x prefix if present (pysui expects raw key without prefix)
+        if admin_key.startswith("0x"):
+            admin_key = admin_key[2:]
         
         if HAS_PYSUI and admin_key and config.PACKAGE_ID and config.PACKAGE_ID != "0x0":
             print(f"Attempting REAL on-chain transaction: {function}")
@@ -616,7 +619,17 @@ async def auto_distribute_task():
 
                     status = result.get("status") if isinstance(result, dict) else None
                     if status != "success":
-                        print(f"AUTOMATION: Distribution did not complete for {pool_id} (status={status}). Pool will remain open for manual retry.")
+                        error_msg = result.get("message") or result.get("error") or "unknown error"
+                        # If no scores, just reset the pool and skip distribution
+                        if status == "no_scores":
+                            print(f"AUTOMATION: No scores for {pool_id}. Skipping distribution and resetting pool.")
+                            pool_start_times[pool_id] = now
+                            pool_leaderboards[pool_id] = []
+                            pool_participants[pool_id] = []
+                            escrow_funds[pool_id] = 0
+                            save_data()
+                            continue
+                        print(f"AUTOMATION: Distribution did not complete for {pool_id} (status={status}, message={error_msg}). Pool will remain open for manual retry.")
                         continue
 
                     # Reset pool for the next period only when payout succeeded
@@ -992,13 +1005,20 @@ async def perform_reward_distribution(data: PayoutRequest):
     """Internal logic to distribute rewards to winners of a pool"""
     try:
         global global_leaderboard
+        print(f"PAYOUT: Starting distribution for pool {data.pool_id}")
+        print(f"PAYOUT: pool_leaderboards keys: {list(pool_leaderboards.keys())}")
+        print(f"PAYOUT: pool_data keys: {list(pool_data.keys())}")
+        
         if data.pool_id not in pool_leaderboards:
+            print(f"PAYOUT: Pool {data.pool_id} not found in pool_leaderboards")
             return {"status": "error", "message": "Pool not found in leaderboards"}
         
         if data.pool_id not in pool_data:
+            print(f"PAYOUT: Pool {data.pool_id} not found in pool_data")
             return {"status": "error", "message": "Pool not found in metadata"}
         
         leaderboard = pool_leaderboards[data.pool_id][:data.num_winners]
+        print(f"PAYOUT: Leaderboard entries for {data.pool_id}: {len(leaderboard)}")
         
         # RECOVERY LOGIC: If active leaderboard is empty, check history for a distribution that failed to move funds
         if not leaderboard:
