@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import Optional, List
 from collections import defaultdict
 from datetime import timedelta
 import time
@@ -10,6 +10,8 @@ import os
 import subprocess
 from config import config
 import httpx
+import boto3
+from botocore.exceptions import ClientError
 
 # Sui Imports
 try:
@@ -187,20 +189,37 @@ def prune_global_leaderboard_entries() -> bool:
     return False
 
 def load_data():
-    """Load data from local JSON file"""
+    """Load data from S3 if configured, otherwise from local JSON file"""
     global global_leaderboard, pool_leaderboards, pool_data, transactions, escrow_funds, pool_participants, dev_fees_collected, pool_start_times, active_games, pool_history
     
     try:
-        _ensure_data_dir()
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r') as f:
-                data = json.load(f)
-            print("Data loaded from local file")
-            
-            # ... (mock data check omitted for brevity)
-        else:
-            print("No existing data found, starting fresh")
-            data = {}
+        data = {}
+        
+        # Try loading from S3 first
+        if config.S3_BUCKET_NAME and config.S3_DATA_KEY:
+            try:
+                s3 = boto3.client('s3')
+                response = s3.get_object(Bucket=config.S3_BUCKET_NAME, Key=config.S3_DATA_KEY)
+                data = json.loads(response['Body'].read().decode('utf-8'))
+                print("Data loaded from S3")
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'NoSuchKey':
+                    print("No data found in S3, trying local file")
+                else:
+                    print(f"Error loading from S3: {e}")
+            except Exception as e:
+                print(f"Error loading from S3: {e}")
+        
+        # Fall back to local file if S3 failed or returned no data
+        if not data:
+            _ensure_data_dir()
+            if os.path.exists(DATA_FILE):
+                with open(DATA_FILE, 'r') as f:
+                    data = json.load(f)
+                print("Data loaded from local file")
+            else:
+                print("No existing data found, starting fresh")
+                data = {}
         
         global_leaderboard = data.get("global_leaderboard", [])
         pool_leaderboards = defaultdict(list, {k: v for k, v in data.get("pool_leaderboards", {}).items()})
@@ -257,7 +276,7 @@ def load_data():
         print("Starting with empty data")
 
 def save_data():
-    """Save data to local JSON file"""
+    """Save data to local JSON file and S3 if configured"""
     data = {
         "global_leaderboard": global_leaderboard,
         "pool_leaderboards": dict(pool_leaderboards),
@@ -275,6 +294,20 @@ def save_data():
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f, indent=2)
         print("Data saved to local file")
+        
+        # Save to S3 if configured
+        if config.S3_BUCKET_NAME and config.S3_DATA_KEY:
+            try:
+                s3 = boto3.client('s3')
+                s3.put_object(
+                    Bucket=config.S3_BUCKET_NAME,
+                    Key=config.S3_DATA_KEY,
+                    Body=json.dumps(data),
+                    ContentType='application/json'
+                )
+                print("Data saved to S3")
+            except Exception as s3_err:
+                print(f"Error saving to S3: {s3_err}")
     except Exception as e:
         print(f"Error saving data: {e}")
 
@@ -1000,6 +1033,21 @@ async def reset_data():
 async def distribute_rewards(data: PayoutRequest, x_dev_wallet: str = Depends(dev_wallet_auth)):
     """Distribute rewards to winners of a pool (API Endpoint)"""
     return await perform_reward_distribution(data)
+
+@app.post("/force-distribute-rewards")
+async def force_distribute_rewards(data: PayoutRequest, x_dev_wallet: str = Depends(dev_wallet_auth)):
+    """Force distribute rewards regardless of pool timer - for immediate payout testing"""
+    # Override pool start time to make it appear expired
+    original_start_time = pool_start_times.get(data.pool_id, int(time.time()))
+    pool_start_times[data.pool_id] = int(time.time()) - POOL_DURATIONS.get(data.pool_id, 86400) - 1
+    
+    result = await perform_reward_distribution(data)
+    
+    # Restore original start time if payout failed
+    if result.get("status") != "success":
+        pool_start_times[data.pool_id] = original_start_time
+    
+    return result
 
 async def perform_reward_distribution(data: PayoutRequest):
     """Internal logic to distribute rewards to winners of a pool"""
