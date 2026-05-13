@@ -489,10 +489,21 @@ async def call_smart_contract(function: str, args: list):
         if HAS_PYSUI and admin_key and config.PACKAGE_ID and config.PACKAGE_ID != "0x0":
             print(f"Attempting REAL on-chain transaction: {function}")
             try:
-                # Handle Bech32 format (suiprivkey1...) if provided
-                # pysui 0.40+ handles this in some methods, but let's be explicit
-                # if it's not a hex string, it might be Bech32
-                
+                # Handle Hex keys (64 or 66 chars) by converting to Base64 for pysui
+                import base64
+                if len(admin_key) in [64, 66]:
+                    key_hex = admin_key
+                    if key_hex.startswith("0x"):
+                        key_hex = key_hex[2:]
+                    if len(key_hex) == 64:
+                        try:
+                            # Convert hex to bytes, then base64
+                            key_bytes = bytes.fromhex(key_hex)
+                            admin_key = base64.b64encode(key_bytes).decode('utf-8')
+                            print("Converted Hex private key to Base64 for pysui")
+                        except Exception as e:
+                            print(f"Key conversion failed: {e}")
+
                 # Initialize Sui client with admin key
                 try:
                     cfg = SuiConfig.user_config(
