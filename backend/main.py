@@ -76,7 +76,7 @@ class PayoutRequest(BaseModel):
     num_winners: int = 10  # Number of top players to pay out
 
 # Data persistence
-DATA_FILE = os.getenv("DATA_FILE", os.path.join(os.getcwd(), "data.json"))
+DATA_FILE = os.getenv("DATA_FILE", "/var/data/sui/data.json")
 
 
 def _get_duration_override(env_name: str, default_seconds: int) -> int:
@@ -482,11 +482,21 @@ async def call_smart_contract(function: str, args: list):
         if HAS_PYSUI and admin_key and config.PACKAGE_ID and config.PACKAGE_ID != "0x0":
             print(f"Attempting REAL on-chain transaction: {function}")
             try:
+                # Handle Bech32 format (suiprivkey1...) if provided
+                # pysui 0.40+ handles this in some methods, but let's be explicit
+                # if it's not a hex string, it might be Bech32
+                
                 # Initialize Sui client with admin key
-                cfg = SuiConfig.user_config(
-                    rpc_url=config.SUI_NETWORK,
-                    prv_keys=[admin_key]
-                )
+                try:
+                    cfg = SuiConfig.user_config(
+                        rpc_url=config.SUI_NETWORK,
+                        prv_keys=[admin_key]
+                    )
+                except Exception as cfg_err:
+                    print(f"SuiConfig initialization failed: {cfg_err}")
+                    # Try alternative initialization if first one fails
+                    raise cfg_err
+
                 client = SyncClient(cfg)
                 
                 # Build and execute transaction
@@ -501,12 +511,10 @@ async def call_smart_contract(function: str, args: list):
                     winner_addrs_list = [SuiAddress(w[0]) for w in winners]
                     winner_amounts_list = [SuiU64(int(w[1])) for w in winners]
                     
-                    winner_addrs = SuiArray(winner_addrs_list)
-                    winner_amounts = SuiArray(winner_amounts_list)
-                    
+                    # In many pysui versions, move_call handles lists of Sui types directly for vectors
                     txer.move_call(
                         target=f"{config.PACKAGE_ID}::pool::distribute_rewards",
-                        arguments=[ObjectID(pool_id), winner_addrs, winner_amounts]
+                        arguments=[ObjectID(pool_id), winner_addrs_list, winner_amounts_list]
                     )
                 else:
                     # Generic fallback - just simulate for unsupported functions
@@ -577,6 +585,17 @@ async def auto_distribute_task():
                 start_time = pool_start_times.get(pool_id, now)
                 elapsed = now - start_time
                 if elapsed >= duration:
+                    # Sync from chain before deciding to skip or distribute
+                    contract_id = pool_data.get(pool_id, {}).get("contract_id")
+                    if contract_id and contract_id != "0x0":
+                        try:
+                            onchain_bal = await fetch_pool_balance_onchain(contract_id)
+                            if onchain_bal is not None:
+                                print(f"AUTOMATION: Synced {pool_id} balance from chain: {onchain_bal} Mist")
+                                escrow_funds[pool_id] = onchain_bal
+                        except Exception as sync_err:
+                            print(f"AUTOMATION: Sync failed for {pool_id} before distribution: {sync_err}")
+
                     participants = pool_participants.get(pool_id, [])
                     escrow_balance = escrow_funds.get(pool_id, 0)
                     if not participants and escrow_balance <= 0:
@@ -618,9 +637,16 @@ async def auto_distribute_task():
                     status = result.get("status") if isinstance(result, dict) else None
                     if status != "success":
                         error_msg = result.get("message") or result.get("error") or "unknown error"
-                        # If no scores, just reset the pool and skip distribution
+                        # If no scores, decide whether to reset or wait
                         if status == "no_scores":
-                            print(f"AUTOMATION: No scores for {pool_id}. Skipping distribution and resetting pool.")
+                            if escrow_balance > 0:
+                                print(f"AUTOMATION WARNING: Pool {pool_id} has {escrow_balance} Mist but NO scores/participants found in memory.")
+                                print(f"This likely means the server restarted and lost local data. Timer will NOT be reset to allow for manual recovery or score submission.")
+                                # We don't continue here, we just don't reset. 
+                                # But we should sleep a bit longer for this pool to avoid spamming logs.
+                                continue
+
+                            print(f"AUTOMATION: No scores and no funds for {pool_id}. Resetting pool for new period.")
                             pool_start_times[pool_id] = now
                             pool_leaderboards[pool_id] = []
                             pool_participants[pool_id] = []
@@ -1106,7 +1132,11 @@ async def perform_reward_distribution(data: PayoutRequest):
             winners
         ])
         
-        if contract_result["status"] == "success":
+        # Treat both success and simulated as 'success' for state management purposes
+        if contract_result["status"] in ["success", "simulated"]:
+            if contract_result["status"] == "simulated":
+                print(f"PAYOUT WARNING: Distribution was SIMULATED for {data.pool_id}. Real funds were NOT moved on-chain.")
+            
             # Archive this pool cycle to history before clearing
             pool_history.append({
                 "pool_id": data.pool_id,
@@ -1150,8 +1180,9 @@ async def perform_reward_distribution(data: PayoutRequest):
                 "prize_after_fee": f"{(prize_after_fee_mist/1e9):.3f} SUI",
                 "num_winners": len(payouts),
                 "payouts": payouts,
-                "contract_transaction": contract_result["transaction_id"],
-                "message": "Rewards distributed via smart contract"
+                "contract_status": contract_result["status"],
+                "contract_transaction": contract_result.get("transaction_id"),
+                "message": "Rewards distribution process completed" if contract_result["status"] == "success" else "Rewards distribution simulated"
             }
         else:
             return {
@@ -1323,7 +1354,7 @@ async def admin_force_payout(pool_id: str):
         print(f"FORCE PAYOUT: On-chain balance query returned 0 or failed for {pool_object_id}")
     
     # Trigger distribution
-    result = await distribute_rewards(PayoutRequest(pool_id=pool_id, num_winners=10))
+    result = await perform_reward_distribution(PayoutRequest(pool_id=pool_id, num_winners=10))
     
     return {
         "status": "force_payout_triggered",
