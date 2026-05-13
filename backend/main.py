@@ -10,8 +10,6 @@ import os
 import subprocess
 from config import config
 import httpx
-import boto3
-from botocore.exceptions import ClientError
 
 # Sui Imports
 try:
@@ -189,37 +187,18 @@ def prune_global_leaderboard_entries() -> bool:
     return False
 
 def load_data():
-    """Load data from S3 if configured, otherwise from local JSON file"""
+    """Load data from local JSON file"""
     global global_leaderboard, pool_leaderboards, pool_data, transactions, escrow_funds, pool_participants, dev_fees_collected, pool_start_times, active_games, pool_history
     
     try:
-        data = {}
-        
-        # Try loading from S3 first
-        if config.S3_BUCKET_NAME and config.S3_DATA_KEY:
-            try:
-                s3 = boto3.client('s3')
-                response = s3.get_object(Bucket=config.S3_BUCKET_NAME, Key=config.S3_DATA_KEY)
-                data = json.loads(response['Body'].read().decode('utf-8'))
-                print("Data loaded from S3")
-            except ClientError as e:
-                if e.response['Error']['Code'] == 'NoSuchKey':
-                    print("No data found in S3, trying local file")
-                else:
-                    print(f"Error loading from S3: {e}")
-            except Exception as e:
-                print(f"Error loading from S3: {e}")
-        
-        # Fall back to local file if S3 failed or returned no data
-        if not data:
-            _ensure_data_dir()
-            if os.path.exists(DATA_FILE):
-                with open(DATA_FILE, 'r') as f:
-                    data = json.load(f)
-                print("Data loaded from local file")
-            else:
-                print("No existing data found, starting fresh")
-                data = {}
+        _ensure_data_dir()
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r') as f:
+                data = json.load(f)
+            print("Data loaded from local file")
+        else:
+            print("No existing data found, starting fresh")
+            data = {}
         
         global_leaderboard = data.get("global_leaderboard", [])
         pool_leaderboards = defaultdict(list, {k: v for k, v in data.get("pool_leaderboards", {}).items()})
@@ -276,7 +255,7 @@ def load_data():
         print("Starting with empty data")
 
 def save_data():
-    """Save data to local JSON file and S3 if configured"""
+    """Save data to local JSON file"""
     data = {
         "global_leaderboard": global_leaderboard,
         "pool_leaderboards": dict(pool_leaderboards),
@@ -294,20 +273,6 @@ def save_data():
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f, indent=2)
         print("Data saved to local file")
-        
-        # Save to S3 if configured
-        if config.S3_BUCKET_NAME and config.S3_DATA_KEY:
-            try:
-                s3 = boto3.client('s3')
-                s3.put_object(
-                    Bucket=config.S3_BUCKET_NAME,
-                    Key=config.S3_DATA_KEY,
-                    Body=json.dumps(data),
-                    ContentType='application/json'
-                )
-                print("Data saved to S3")
-            except Exception as s3_err:
-                print(f"Error saving to S3: {s3_err}")
     except Exception as e:
         print(f"Error saving data: {e}")
 
