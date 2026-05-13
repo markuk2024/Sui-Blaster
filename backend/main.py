@@ -705,6 +705,11 @@ async def auto_distribute_task():
 @app.on_event("startup")
 async def startup_event():
     """Load data from file and start automation on startup"""
+    print("=======================================")
+    print("SUI BASTER BACKEND STARTING")
+    print("VERSION: 2.0.8")
+    print(f"DATA_FILE: {DATA_FILE}")
+    print("=======================================")
     load_data()
     # Start the background task
     asyncio.create_task(auto_distribute_task())
@@ -1270,7 +1275,7 @@ def get_backend_status():
     total_dev = sum(dev_fees_collected.values())
     return {
         "status": "running",
-        "version": "2.0.7",
+        "version": "2.0.8",
         "timestamp": int(time.time()),
         "pools": {
             pool_id: {
