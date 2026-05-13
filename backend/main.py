@@ -544,18 +544,26 @@ async def call_smart_contract(function: str, args: list):
                     "message": "Transaction executed on-chain"
                 }
             except Exception as e:
-                print(f"Real transaction failed: {e}")
-                # Fall through to simulation
+                error_detail = str(e)
+                print(f"Real transaction failed: {error_detail}")
+                return {
+                    "status": "error",
+                    "error": error_detail,
+                    "message": f"Real on-chain transaction failed: {error_detail}"
+                }
         
-        # Fallback to simulation
+        # Fallback to simulation if no admin key or pysui
+        reason = ""
         if not admin_key:
-            print(f"ADMIN_PRIVATE_KEY not found - simulating {function}")
+            reason = "ADMIN_PRIVATE_KEY not found"
         elif not HAS_PYSUI:
-            print(f"pysui not installed - simulating {function}")
+            reason = "pysui not installed"
         elif not config.PACKAGE_ID or config.PACKAGE_ID == "0x0":
-            print(f"PACKAGE_ID not set - simulating {function}")
+            reason = "PACKAGE_ID not set"
         else:
-            print(f"Falling back to simulation for {function}")
+            reason = "Unknown fallback to simulation"
+            
+        print(f"Simulating {function}: {reason}")
         
         return {
             "status": "simulated",
